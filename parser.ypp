@@ -1,0 +1,251 @@
+%{
+#include <cstdio>
+#include <cstdlib>
+#include <vector>
+#include <string>
+#include <iostream>
+#include <memory>
+#include <unordered_map>
+#include "nodes.hpp"
+#include "lex.yy.cc"
+
+extern FILE *yyin;
+extern char* yytext();
+extern int yylex();
+
+static std::unique_ptr<Program> root;
+%}
+
+%union {
+    int ival;
+    float fval;
+    char *sval;
+    Node* node;
+    Expression* expression;
+    std::vector<std::pair<std::string, std::string>> *parameters;
+    std::vector<std::unique_ptr<Node>> *statements;
+    std::string *literal_value;
+    std::string *identifier_name;
+}
+
+%token <identifier_name> T_IDENTIFIER
+%token <literal_value> T_NUMBER T_FLOAT_NUMBER T_STRING_LITERAL 
+%token T_INT T_FLOAT T_STRING T_BOOL
+%token T_PLUS T_MINUS T_TIMES T_DIVIDE T_EQUALS T_LPAREN T_RPAREN T_LBRACE T_RBRACE T_SEMICOLON T_COMMA
+%token T_EQ T_NEQ T_LT T_GT T_LE T_GE
+%token T_IF T_RETURN
+%token T_EOF T_UNKNOWN
+
+%type <node> program statement variable_declaration function_declaration if_statement return_statement expression binary_operation primary
+%type <statements> statement_list
+%type <parameters> parameter_list
+%type <identifier_name> type
+
+%%
+
+program:
+    statement_list T_EOF
+    {
+        std::unique_ptr<Program> root = std::make_unique<Program>();
+        root->statements = std::move(*(yyvsp[-1].statements));
+        delete (yyvsp[-1].statements);
+        std::unordered_map<std::string, std::string> symbolTable;
+        typeCheck(root.get(), symbolTable);
+    }
+
+statement_list: 
+    statement_list statement { 
+        $$ = $1;
+        $$->push_back(std::move($2));
+        delete $2;
+    }
+    | statement {
+        $$ = new std::vector<std::unique_ptr<Node>>();
+        $$->push_back(std::move($1));
+        delete 
+    };
+
+statement:
+    variable_declaration 
+    | function_declaration
+    | if_statement
+    | return_statement
+    | error T_UNKNOWN { yyerror("Unexpected token"); yyerrok; }
+    ;
+
+variable_declaration: 
+    type T_IDENTIFIER T_EQUALS expression T_SEMICOLON 
+    { 
+        $$ = new VariableDeclaration{$1, *$2, std::move($4)}; 
+    };
+
+function_declaration:
+    type T_IDENTIFIER T_LPAREN parameter_list T_RPAREN T_LBRACE statement_list T_RBRACE 
+    {
+        $$ = std::make_unique<FunctionDeclaration>();
+        $$->returnType = $1;
+        $$->identifier = *$2;
+        $$->parameters = std::move(*$4);
+        $$->body = std::move(*$7);
+
+        delete $4;
+        delete $7;
+    };
+
+parameter_list:
+    parameter_list T_COMMA type T_IDENTIFIER { $$ = $1; $$->emplace_back($3, *$4); }
+    | type T_IDENTIFIER { $$ = new std::vector<std::pair<std::string, std::string>>(); $$->emplace_back($1, *$2); }
+    | { $$ = new std::vector<std::pair<std::string, std::string>>(); }
+    ;
+
+if_statement: 
+    T_IF T_LPAREN expression T_RPAREN T_LBRACE statement_list T_RBRACE
+    {
+        $$ = new IfStatement{std::move($3), std::move(*$6)};
+        delete $6;
+    };
+
+return_statement:
+    T_RETURN expression T_SEMICOLON
+    {
+        $$ = new ReturnStatement{std::move($2)};
+    };
+
+expression:
+    primary | binary_operation;
+
+primary: 
+    T_NUMBER { $$ = new Literal{*($1.literal_value)}; } 
+    | T_FLOAT_NUMBER { $$ = new Literal{*($1.literal_value)}; }    
+    | T_STRING_LITERAL { $$ = new Literal{*($1.literal_value)}; }
+    | T_IDENTIFIER { $$ = new Identifier{*($1.identifier_name)}; }
+    | T_LPAREN expression T_RPAREN { $$ = std::move($2); }
+    ;
+
+binary_operation:
+    expression T_PLUS expression { $$ = new BinaryOperation{std::move($1), "+", std::move($3)}; }
+    | expression T_MINUS expression { $$ = new BinaryOperation{std::move($1), "-", std::move($3)}; }
+    | expression T_TIMES expression { $$ = new BinaryOperation{std::move($1), "*", std::move($3)}; }
+    | expression T_DIVIDE expression { $$ = new BinaryOperation{std::move($1), "/", std::move($3)}; }
+    | expression T_EQ expression { $$ = new BinaryOperation{std::move($1), "==", std::move($3)}; }
+    | expression T_NEQ expression { $$ = new BinaryOperation{std::move($1), "!=", std::move($3)}; }
+    | expression T_LT expression { $$ = new BinaryOperation{std::move($1), "<", std::move($3)}; }
+    | expression T_GT expression { $$ = new BinaryOperation{std::move($1), ">", std::move($3)}; }
+    | expression T_LE expression { $$ = new BinaryOperation{std::move($1), "<=", std::move($3)}; }
+    | expression T_GE expression { $$ = new BinaryOperation{std::move($1), ">=", std::move($3)}; }
+    ;
+
+type:  
+    T_INT { $$ = "int"; } 
+    | T_BOOL { $$ = "bool"; } 
+    | T_FLOAT { $$ = "float"; }
+    | T_STRING { $$ = "string"; };
+
+%%
+
+void yyerror(const char* s) {
+    std::cerr << "Error: " << s << std::endl;
+}
+
+void typeCheck(Node* node, std::unordered_map<std::string, std::string>& symbolTable) {
+    if (auto varDecl = dynamic_cast<VariableDeclaration*>(node)) {
+        checkVariableDeclaration(varDecl, symbolTable);
+    } else if (auto funcDecl = dynamic_cast<FunctionDeclaration*>(node)) {
+        checkFunctionDeclaration(funcDecl, symbolTable);
+    } else if (auto ifStatement = dynamic_cast<IfStatement*>(node)) {
+        checkIfStatement(ifStatement, symbolTable);
+    } else if (auto returnStatement = dynamic_cast<ReturnStatement*>(node)) {
+        checkReturnStatement(returnStatement, symbolTable);
+    } else if (auto binaryOp = dynamic_cast<BinaryOperation*>(node)) {
+        checkBinaryOperation(binaryOp, symbolTable);
+    } else if (auto literal = dynamic_cast<Literal*>(node)) {
+    } else if (auto identifier = dynamic_cast<Identifier*>(node)) {
+        checkIdentifier(identifier, symbolTable);
+    } else {
+        std::cerr << "Error: Unsupported node type" << std::endl;
+    }
+}
+
+void checkVariableDeclaration(VariableDeclaration* varDecl, std::unordered_map<std::string, std::string>& symbolTable) {
+    if (symbolTable.find(varDecl->identifier) != symbolTable.end()) {
+        std::cerr << "Error: Variable " << varDecl->identifier << " already declared" << std::endl;
+    } else {
+        symbolTable[varDecl->identifier] = varDecl->type;
+        typeCheck(varDecl->expression.get(), symbolTable);
+    }
+}
+
+void checkFunctionDeclaration(FunctionDeclaration* funcDecl, std::unordered_map<std::string, std::string>& symbolTable) {
+    if (symbolTable.find(funcDecl->identifier) != symbolTable.end()) {
+        std::cerr << "Error: Function " << funcDecl->identifier << " already declared" << std::endl;
+    } else {
+        symbolTable[funcDecl->identifier] = funcDecl->returnType;
+    }
+
+    for (const auto& param : funcDecl->parameters) {
+        symbolTable[param.first] = param.second;
+    }
+
+    for (const auto& statement : funcDecl->body) {
+        typeCheck(statement.get(), symbolTable);
+    }
+}
+
+void checkIfStatement(IfStatement* ifStatement, std::unordered_map<std::string, std::string>& symbolTable) {
+    typeCheck(ifStatement->condition.get(), symbolTable);
+
+    for (const auto& statement : ifStatement->body) {
+        typeCheck(statement.get(), symbolTable);
+    }
+}
+
+void checkReturnStatement(ReturnStatement* returnStatement, std::unordered_map<std::string, std::string>& symbolTable) {
+    typeCheck(returnStatement->expression.get(), symbolTable);
+    std::string returnType = getNodeType(returnStatement->expression.get(), symbolTable);
+
+    if (returnType != symbolTable["returnType"]) {
+        std::cerr << "Error: Return type mismatch in function" << std::endl;
+    }
+}
+
+void checkBinaryOperation(BinaryOperation* binaryOp, std::unordered_map<std::string, std::string>& symbolTable) {
+    typeCheck(binaryOp->left.get(), symbolTable);
+    typeCheck(binaryOp->right.get(), symbolTable);
+    std::string leftType = getNodeType(binaryOp->left.get(), symbolTable);
+    std::string rightType = getNodeType(binaryOp->right.get(), symbolTable);
+
+    if (binaryOp->op == "+" || binaryOp->op == "-" || binaryOp->op == "*" || binaryOp->op == "/") {
+        if (!isNumericType(leftType) || !isNumericType(rightType)) {
+            std::cerr << "Error: Operands of arithmetic operation must be numeric" << std::endl;
+        }
+    } else if (binaryOp->op == "==" || binaryOp->op == "!=" || binaryOp->op == "<" || binaryOp->op == ">" ||
+               binaryOp->op == "<=" || binaryOp->op == ">=") {
+        if (leftType != rightType) {
+            std::cerr << "Error: Operands of comparison operation must have compatible types" << std::endl;
+        }
+    } else {
+        std::cerr << "Error: Unsupported binary operation" << std::endl;
+    }
+}
+
+void checkIdentifier(Identifier* identifier, std::unordered_map<std::string, std::string>& symbolTable) {
+    if (symbolTable.find(identifier->name) == symbolTable.end()) {
+        std::cerr << "Error: Undeclared variable " << identifier->name << std::endl;
+    }
+}
+
+bool isNumericType(const std::string& type) {
+    return type == "int" || type == "float";
+}
+
+std::string getNodeType(Node* node, std::unordered_map<std::string, std::string>& symbolTable) {
+    if (auto literal = dynamic_cast<Literal*>(node)) {
+        return literal->type;
+    } else if (auto identifier = dynamic_cast<Identifier*>(node)) {
+        return symbolTable[identifier->name];
+    } else if (auto binaryOp = dynamic_cast<BinaryOperation*>(node)) {
+        return getNodeType(binaryOp->left.get(), symbolTable);
+    }
+
+    return "unknown";
+}
